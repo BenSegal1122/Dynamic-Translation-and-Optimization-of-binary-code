@@ -85,6 +85,8 @@ KNOB<BOOL>   KnobApplyThreadedCommit(KNOB_MODE_WRITEONCE,    "pintool",
 /* ===================================================================== */
 std::ofstream* out = 0;
 
+int count_threads = 0;
+
 // For XED:
 #if defined(TARGET_IA32E)
     xed_state_t dstate = {XED_MACHINE_MODE_LONG_64, XED_ADDRESS_WIDTH_64b};
@@ -126,14 +128,23 @@ int max_ins_count = 0;
 // in a separate thread.
 volatile bool enable_mt_dump_counters_flag = false;
 
+
+
 typedef struct {
-  ADDRINT starting_bbl;
-  INS* next_ins;
-} bbl_list;
+  ADDRINT bbl_address;
+  long long* ex_counter;
+} bbl_profile;
+
+
+map<ADDRINT, bbl_profile> bbl_map;
+
+
 /* ============================================================= */
 /* Service dump routines                                         */
 /* ============================================================= */
-
+/*VOID Count_bbl(ADDRINT bblAddr) {
+  bbl_map[bblAddr].ex_counter++;
+  }*/
 /*************************/
 /* dump_all_image_instrs */
 /*************************/
@@ -273,6 +284,11 @@ void dump_tc()
 
       size = xed_decoded_inst_get_length (&new_xedd);
   }
+  // TODO: uncomment for print the BBLs
+  //for (const auto& pair : bbl_map) {
+  //      cerr << "Key: " << pair.first << ", Value: " << pair.second.ex_counter << std::endl;
+  //  }
+  
 }
 
 
@@ -726,7 +742,7 @@ int fix_instructions_displacements()
 
 
 bool is_jump_instruction(INS ins){
-  if (INS_IsIndirectControlFlow(ins) || INS_IsDirectControlFlow(ins) || INS_IsRet(ins) || INS_IsCall(ins)){
+  if ((INS_IsIndirectControlFlow(ins) || INS_IsDirectControlFlow(ins) || INS_IsRet(ins)) && (!INS_IsCall(ins))){
     return true;
   }
   return false;
@@ -785,6 +801,7 @@ int find_candidate_rtns_for_translation(IMG img)
 {
     int rc;
     bool jump_ins_flag;
+    ADDRINT prev_ins_addr; 
     // go over routines and check if they are candidates for translation and mark them for translation:
 
     for (SEC sec = IMG_SecHead(img); SEC_Valid(sec); sec = SEC_Next(sec))
@@ -811,7 +828,7 @@ int find_candidate_rtns_for_translation(IMG img)
             for (INS ins = RTN_InsHead(rtn); INS_Valid(ins); ins = INS_Next(ins)) {
 	      jump_ins_flag = false;
 	      jump_ins_flag = is_jump_instruction(ins);
-	      
+
 	      //debug print of orig instruction:
 	      if (KnobVerbose) {
 		cerr << "old instr: ";
@@ -819,7 +836,10 @@ int find_candidate_rtns_for_translation(IMG img)
 		//xed_print_hex_line(reinterpret_cast<UINT8*>(INS_Address (ins)), INS_Size(ins));
 	      }
 
+	      
+
 	      if (jump_ins_flag){ // add NOP2 before every branch instruction
+		// if i got into a branch instruction that means that this basic block is finished
 
 		xed_decoded_inst_t xedd1;
 		xed_error_enum_t xed_code1;
@@ -830,7 +850,7 @@ int find_candidate_rtns_for_translation(IMG img)
 		unsigned int ilen1 = XED_MAX_INSTRUCTION_BYTES;
 		unsigned int olen1 = 0;
                 
-		xed_inst0(&enc_instr1, dstate, XED_ICLASS_NOP2, 64);
+		xed_inst0(&enc_instr1, dstate, XED_ICLASS_NOP8, 64);
 		
 		xed_encoder_request_zero_set_mode(&enc_req1, &dstate);
 		xed_bool_t convert_ok1 = xed_convert_to_encoder_request(&enc_req1, &enc_instr1);
@@ -855,10 +875,264 @@ int find_candidate_rtns_for_translation(IMG img)
 		  cerr << "ERROR: failed during instructon translation." << endl;
 		  return -1;
 		}
-	      }
-
+		auto it = bbl_map.find(prev_ins_addr);
+		if (it == bbl_map.end()) {
+		  bbl_profile temp_member;
+		  temp_member.bbl_address = prev_ins_addr;
+		  temp_member.ex_counter = new long long;
+		  *(temp_member.ex_counter) = 0;
+		  bbl_map[prev_ins_addr] = temp_member;
+		}
+		///////////////////////////////////////////////////////////////////////////////////////////////////////TEST TEST TEST///////////////////////////////////////////////
+		//stopped here - got segfault for some reason. check the -dump_tc and it looks like the command are correctly instasiated....
+		// results are in temp_ben8.txt the -dump_tc and in temp_ben9.txt the -dump_bb_counters
+		static uint64_t rax_mem;
+		static uint64_t rflags_mem;
+		//		static uint64_t bb_map_mem[MAX_BBL_NUM];
+		// MOV RAX into rax_mem - (save RAX in mem)
+		xed_inst2(&enc_instr1, dstate, XED_ICLASS_MOV, 64,
+			  xed_mem_bd(XED_REG_INVALID, xed_disp((ADDRINT)&rax_mem, 64), 64),
+			  xed_reg(XED_REG_RAX));
+		xed_encoder_request_zero_set_mode(&enc_req1, &dstate);
+		convert_ok1 = xed_convert_to_encoder_request(&enc_req1, &enc_instr1);
+		if (!convert_ok1) {
+		  cerr << "conversion to encode request failed" << endl;
+		  return -1;
+		}
+		xed_error = xed_encode(&enc_req1,
+				       reinterpret_cast<UINT8*>(encoded_ins1), ilen1, &olen1);
+		if (xed_error != XED_ERROR_NONE) {
+		  cerr << "ENCODE ERROR: " << xed_error_enum_t2str(xed_error) << endl;
+		  return -1;
+		}
+		xed_decoded_inst_zero_set_mode(&xedd1,&dstate);
+		xed_code1 = xed_decode(&xedd1, reinterpret_cast<UINT8*>(&encoded_ins1), max_inst_len);
+		if (xed_code1 != XED_ERROR_NONE) {
+		  //cerr << "ERROR: xed decode failed for instr at: " << "0x" << hex << addr << endl;
+		  return -1;;
+		}
+		rc = add_new_instr_entry(&xedd1, 0x0, olen1, false);
+		if (rc < 0) {
+		  cerr << "ERROR: failed during instructon translation." << endl;
+		  return -1;
+		}
+		// LAHF – (save RFLAG bits into RAX)
+		xed_inst0(&enc_instr1, dstate, XED_ICLASS_LAHF, 64);
+		xed_encoder_request_zero_set_mode(&enc_req1, &dstate);
+		convert_ok1 = xed_convert_to_encoder_request(&enc_req1, &enc_instr1);
+		if (!convert_ok1) {
+		  cerr << "conversion to encode request failed" << endl;
+		  return -1;
+		}
+		xed_error = xed_encode(&enc_req1,
+				       reinterpret_cast<UINT8*>(encoded_ins1), ilen1, &olen1);
+		if (xed_error != XED_ERROR_NONE) {
+		  cerr << "ENCODE ERROR: " << xed_error_enum_t2str(xed_error) << endl;
+		  return -1;
+		}
+		xed_decoded_inst_zero_set_mode(&xedd1,&dstate);
+		xed_code1 = xed_decode(&xedd1, reinterpret_cast<UINT8*>(&encoded_ins1), max_inst_len);
+		if (xed_code1 != XED_ERROR_NONE) {
+		  //cerr << "ERROR: xed decode failed for instr at: " << "0x" << hex << addr << endl;
+		  return -1;;
+		}
+		rc = add_new_instr_entry(&xedd1, 0x0, olen1, false);
+		if (rc < 0) {
+		  cerr << "ERROR: failed during instructon translation." << endl;
+		  return -1;
+		}
+		// MOV RAX into rflags_mem – (save RFLAGS in mem)
+		xed_inst2(&enc_instr1, dstate, XED_ICLASS_MOV, 64,
+			  xed_mem_bd(XED_REG_INVALID, xed_disp((ADDRINT)&rflags_mem, 64), 64),
+			  xed_reg(XED_REG_RAX));
+		xed_encoder_request_zero_set_mode(&enc_req1, &dstate);
+		convert_ok1 = xed_convert_to_encoder_request(&enc_req1, &enc_instr1);
+		if (!convert_ok1) {
+		  cerr << "conversion to encode request failed" << endl;
+		  return -1;
+		}
+		xed_error = xed_encode(&enc_req1,
+				       reinterpret_cast<UINT8*>(encoded_ins1), ilen1, &olen1);
+		if (xed_error != XED_ERROR_NONE) {
+		  cerr << "ENCODE ERROR: " << xed_error_enum_t2str(xed_error) << endl;
+		  return -1;
+		}
+		xed_decoded_inst_zero_set_mode(&xedd1,&dstate);
+		xed_code1 = xed_decode(&xedd1, reinterpret_cast<UINT8*>(&encoded_ins1), max_inst_len);
+		if (xed_code1 != XED_ERROR_NONE) {
+		  //cerr << "ERROR: xed decode failed for instr at: " << "0x" << hex << addr << endl;
+		  return -1;;
+		}
+		rc = add_new_instr_entry(&xedd1, 0x0, olen1, false);
+		if (rc < 0) {
+		  cerr << "ERROR: failed during instructon translation." << endl;
+		  return -1;
+		}
+		// MOV from bb_map_mem[bbl_num] into RAX – (restore bbl counter from mem)
+		xed_inst2(&enc_instr1, dstate, XED_ICLASS_MOV, 64,
+			  xed_reg(XED_REG_RAX),
+			  xed_mem_bd(XED_REG_INVALID,
+				     xed_disp((ADDRINT)&bbl_map[prev_ins_addr].ex_counter, 64), 64));
+		xed_encoder_request_zero_set_mode(&enc_req1, &dstate);
+		convert_ok1 = xed_convert_to_encoder_request(&enc_req1, &enc_instr1);
+		if (!convert_ok1) {
+		  cerr << "conversion to encode request failed" << endl;
+		  return -1;
+		}
+		xed_error = xed_encode(&enc_req1,
+				       reinterpret_cast<UINT8*>(encoded_ins1), ilen1, &olen1);
+		if (xed_error != XED_ERROR_NONE) {
+		  cerr << "ENCODE ERROR: " << xed_error_enum_t2str(xed_error) << endl;
+		  return -1;
+		}
+		xed_decoded_inst_zero_set_mode(&xedd1,&dstate);
+		xed_code1 = xed_decode(&xedd1, reinterpret_cast<UINT8*>(&encoded_ins1), max_inst_len);
+		if (xed_code1 != XED_ERROR_NONE) {
+		  //cerr << "ERROR: xed decode failed for instr at: " << "0x" << hex << addr << endl;
+		  return -1;;
+		}
+		rc = add_new_instr_entry(&xedd1, 0x0, olen1, false);
+		if (rc < 0) {
+		  cerr << "ERROR: failed during instructon translation." << endl;
+		  return -1;
+		}
+		// inc RAX – (increment counter by 1)
+		xed_inst1(&enc_instr1, dstate, XED_ICLASS_INC, 64, xed_reg(XED_REG_RAX));
+		xed_encoder_request_zero_set_mode(&enc_req1, &dstate);
+		convert_ok1 = xed_convert_to_encoder_request(&enc_req1, &enc_instr1);
+		if (!convert_ok1) {
+		  cerr << "conversion to encode request failed" << endl;
+		  return -1;
+		}
+		xed_error = xed_encode(&enc_req1,
+				       reinterpret_cast<UINT8*>(encoded_ins1), ilen1, &olen1);
+		if (xed_error != XED_ERROR_NONE) {
+		  cerr << "ENCODE ERROR: " << xed_error_enum_t2str(xed_error) << endl;
+		  return -1;
+		}
+		xed_decoded_inst_zero_set_mode(&xedd1,&dstate);
+		xed_code1 = xed_decode(&xedd1, reinterpret_cast<UINT8*>(&encoded_ins1), max_inst_len);
+		if (xed_code1 != XED_ERROR_NONE) {
+		  //cerr << "ERROR: xed decode failed for instr at: " << "0x" << hex << addr << endl;
+		  return -1;;
+		}
+		rc = add_new_instr_entry(&xedd1, 0x0, olen1, false);
+		if (rc < 0) {
+		  cerr << "ERROR: failed during instructon translation." << endl;
+		  return -1;
+		}
+		// MOV from RAX into bb_map_mem[bbl_num] – (save incremented counter to mem)
+		xed_inst2(&enc_instr1, dstate, XED_ICLASS_MOV, 64,
+			  xed_mem_bd(XED_REG_INVALID,
+				     xed_disp((ADDRINT)&bbl_map[prev_ins_addr].ex_counter, 64), 64),
+			  xed_reg(XED_REG_RAX));
+		xed_encoder_request_zero_set_mode(&enc_req1, &dstate);
+		convert_ok1 = xed_convert_to_encoder_request(&enc_req1, &enc_instr1);
+		if (!convert_ok1) {
+		  cerr << "conversion to encode request failed" << endl;
+		  return -1;
+		}
+		xed_error = xed_encode(&enc_req1,
+				       reinterpret_cast<UINT8*>(encoded_ins1), ilen1, &olen1);
+		if (xed_error != XED_ERROR_NONE) {
+		  cerr << "ENCODE ERROR: " << xed_error_enum_t2str(xed_error) << endl;
+		  return -1;
+		}
+		xed_decoded_inst_zero_set_mode(&xedd1,&dstate);
+		xed_code1 = xed_decode(&xedd1, reinterpret_cast<UINT8*>(&encoded_ins1), max_inst_len);
+		if (xed_code1 != XED_ERROR_NONE) {
+		  //cerr << "ERROR: xed decode failed for instr at: " << "0x" << hex << addr << endl;
+		  return -1;;
+		}
+		rc = add_new_instr_entry(&xedd1, 0x0, olen1, false);
+		if (rc < 0) {
+		  cerr << "ERROR: failed during instructon translation." << endl;
+		  return -1;
+		}
+		// MOV from rflags_mem into RAX – (restore RFLAGS from mem into RAX)
+		xed_inst2(&enc_instr1, dstate, XED_ICLASS_MOV, 64,
+			  xed_reg(XED_REG_RAX),
+			  xed_mem_bd(XED_REG_INVALID, xed_disp((ADDRINT)&rflags_mem, 64), 64));
+		xed_encoder_request_zero_set_mode(&enc_req1, &dstate);
+		convert_ok1 = xed_convert_to_encoder_request(&enc_req1, &enc_instr1);
+		if (!convert_ok1) {
+		  cerr << "conversion to encode request failed" << endl;
+		  return -1;
+		}
+		xed_error = xed_encode(&enc_req1,
+				       reinterpret_cast<UINT8*>(encoded_ins1), ilen1, &olen1);
+		if (xed_error != XED_ERROR_NONE) {
+		  cerr << "ENCODE ERROR: " << xed_error_enum_t2str(xed_error) << endl;
+		  return -1;
+		}
+		xed_decoded_inst_zero_set_mode(&xedd1,&dstate);
+		xed_code1 = xed_decode(&xedd1, reinterpret_cast<UINT8*>(&encoded_ins1), max_inst_len);
+		if (xed_code1 != XED_ERROR_NONE) {
+		  //cerr << "ERROR: xed decode failed for instr at: " << "0x" << hex << addr << endl;
+		  return -1;;
+		}
+		rc = add_new_instr_entry(&xedd1, 0x0, olen1, false);
+		if (rc < 0) {
+		  cerr << "ERROR: failed during instructon translation." << endl;
+		  return -1;
+		}
+		// SAHF – (restore RFLAGS reg bits from RAX)
+		xed_inst0(&enc_instr1, dstate, XED_ICLASS_SAHF, 64);
+		xed_encoder_request_zero_set_mode(&enc_req1, &dstate);
+		convert_ok1 = xed_convert_to_encoder_request(&enc_req1, &enc_instr1);
+		if (!convert_ok1) {
+		  cerr << "conversion to encode request failed" << endl;
+		  return -1;
+		}
+		xed_error = xed_encode(&enc_req1,
+				       reinterpret_cast<UINT8*>(encoded_ins1), ilen1, &olen1);
+		if (xed_error != XED_ERROR_NONE) {
+		  cerr << "ENCODE ERROR: " << xed_error_enum_t2str(xed_error) << endl;
+		  return -1;
+		}
+		xed_decoded_inst_zero_set_mode(&xedd1,&dstate);
+		xed_code1 = xed_decode(&xedd1, reinterpret_cast<UINT8*>(&encoded_ins1), max_inst_len);
+		if (xed_code1 != XED_ERROR_NONE) {
+		  //cerr << "ERROR: xed decode failed for instr at: " << "0x" << hex << addr << endl;
+		  return -1;;
+		}
+		rc = add_new_instr_entry(&xedd1, 0x0, olen1, false);
+		if (rc < 0) {
+		  cerr << "ERROR: failed during instructon translation." << endl;
+		  return -1;
+		}
+		// MOV from rax_mem into RAX – (restore original RAX)
+		xed_inst2(&enc_instr1, dstate, XED_ICLASS_MOV, 64,
+			  xed_reg(XED_REG_RAX),
+			  xed_mem_bd(XED_REG_INVALID, xed_disp((ADDRINT)&rax_mem, 64), 64));
+		xed_encoder_request_zero_set_mode(&enc_req1, &dstate);
+		convert_ok1 = xed_convert_to_encoder_request(&enc_req1, &enc_instr1);
+		if (!convert_ok1) {
+		  cerr << "conversion to encode request failed" << endl;
+		  return -1;
+		}
+		xed_error = xed_encode(&enc_req1,
+				       reinterpret_cast<UINT8*>(encoded_ins1), ilen1, &olen1);
+		if (xed_error != XED_ERROR_NONE) {
+		  cerr << "ENCODE ERROR: " << xed_error_enum_t2str(xed_error) << endl;
+		  return -1;
+		}
+		xed_decoded_inst_zero_set_mode(&xedd1,&dstate);
+		xed_code1 = xed_decode(&xedd1, reinterpret_cast<UINT8*>(&encoded_ins1), max_inst_len);
+		if (xed_code1 != XED_ERROR_NONE) {
+		  //cerr << "ERROR: xed decode failed for instr at: " << "0x" << hex << addr << endl;
+		  return -1;;
+		}
+		rc = add_new_instr_entry(&xedd1, 0x0, olen1, false);
+		if (rc < 0) {
+		  cerr << "ERROR: failed during instructon translation." << endl;
+		  return -1;
+		}
+		///////////////////////////////////////////////////////////////////////////////////TEST TEST TEST//////////////////////////////////////////////////////////////////////////////
+	      } // jump_ins_flag -> we are out of the jump handler if
 	      
-	      ADDRINT addr = INS_Address(ins);
+	      ADDRINT addr = INS_Address(ins);	      
+	      
 	      
 	      xed_decoded_inst_t xedd;
 	      xed_error_enum_t xed_code;
@@ -877,7 +1151,7 @@ int find_candidate_rtns_for_translation(IMG img)
 		cerr << "ERROR: failed during instructon translation." << endl;
 		return -1;
 	      }
-	      
+	      prev_ins_addr = addr;
             } // end for INS...
 	    
 	    
@@ -899,6 +1173,8 @@ int find_candidate_rtns_for_translation(IMG img)
 
     return 0;
 }
+
+
 
 
 /***************************/
@@ -977,6 +1253,7 @@ inline void commit_translated_routines()
 /*****************************/
 void dump_bb_map_thread(void *v)
 {
+    count_threads++;
     while (!enable_mt_dump_counters_flag);
 
     sleep(1);
@@ -984,7 +1261,15 @@ void dump_bb_map_thread(void *v)
     while (true) {
 
         PIN_LockClient();
-        cerr << "dump bb counters" << endl;
+	int count = 0;
+        cerr << "dump bb counters" << endl;	
+	for (const auto& pair : bbl_map) {
+	  count++;
+	  cout << "Key: " << pair.first << ", Value: " << *(pair.second.ex_counter) << std::endl;
+	}
+	cout << "map size:" << bbl_map.size() << endl;
+	cout << "count:" << count << endl;
+	cout << "count_threads:" << count_threads << endl;
         PIN_UnlockClient();
 
         sleep(1);
@@ -1134,6 +1419,35 @@ VOID ImageLoad(IMG img, VOID *v)
     }
 }
 
+//////////////////Trace///////////////////////////
+/*VOID CountBbl(ADDRINT bblAddr) {
+    bbl_map[bblAddr].ex_counter++;
+    }*/
+//void PIN_FAST_ANALYSIS_CALL docount(ADDRINT bbl_addr) { bbl_map[bbl_addr].ex_counter++; }
+
+/*void Trace(TRACE trace, void *v){
+  cout << "hi" << endl;
+  //for(BBL bbl = TRACE_BblHead(trace); BBL_Valid(bbl); bbl = BBL_Next(bbl)){
+    //ADDRINT bbl_addr = BBL_Address(bbl);
+    //auto it = bbl_map.find(bbl_addr);
+    //if (it == bbl_map.end()) {
+      //bbl_profile temp_member;
+      //temp_member.bbl_start_point = bbl_addr;
+      //temp_member.ex_counter = 0;
+      //bbl_map[BBL_Address(bbl)] = temp_member;
+    //}
+    //BBL_InsertCall(bbl, IPOINT_ANYWHERE, (AFUNPTR)docount, IARG_FAST_ANALYSIS_CALL, IARG_PTR, bbl_addr, IARG_END); 
+  //}
+  }*/
+
+/*void Routine(RTN rtn, void *v){
+  RTN_Open(rtn);
+  for(BBL bbl = RTN_BblHead(rtn); BBL_Valid(bbl); bbl = BBL_Next(bbl)){
+    RTN_InsertCallProbed(rtn, IPOINT_BEFORE, (AFUNPTR)CountBbl, IARG_ADDRINT, BBL_Address(bbl), IARG_END);
+  }
+  }*/
+
+
 
 
 /* ===================================================================== */
@@ -1153,9 +1467,10 @@ INT32 Usage()
 /* Main                                                                  */
 /* ===================================================================== */
 
+
 int main(int argc, char * argv[])
 {
-
+  
     // Initialize pin & symbol manager
     //out = new std::ofstream("xed-print.out");
 
@@ -1164,6 +1479,8 @@ int main(int argc, char * argv[])
 
     PIN_InitSymbols();
 
+    //    RTN_AddInstrumentFunction(Routine, 0);
+    
     // Register ImageLoad
     IMG_AddInstrumentFunction(ImageLoad, 0);
 
@@ -1176,6 +1493,7 @@ int main(int argc, char * argv[])
           cerr << "failed to spawn a thread for commit" << endl;
       }
     }
+    
 
     // Start the program, never returns
     PIN_StartProgramProbed();
