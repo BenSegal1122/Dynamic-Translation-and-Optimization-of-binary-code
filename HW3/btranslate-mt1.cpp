@@ -132,7 +132,7 @@ volatile bool enable_mt_dump_counters_flag = false;
 
 typedef struct {
   ADDRINT bbl_address;
-  long long* ex_counter;
+  int ex_counter;
 } bbl_profile;
 
 
@@ -879,8 +879,8 @@ int find_candidate_rtns_for_translation(IMG img)
 		if (it == bbl_map.end()) {
 		  bbl_profile temp_member;
 		  temp_member.bbl_address = prev_ins_addr;
-		  temp_member.ex_counter = new long long;
-		  *(temp_member.ex_counter) = 0;
+		  temp_member.ex_counter = 0;
+		  //		  *(temp_member.ex_counter) = 0;
 		  bbl_map[prev_ins_addr] = temp_member;
 		}
 		///////////////////////////////////////////////////////////////////////////////////////////////////////TEST TEST TEST///////////////////////////////////////////////
@@ -973,6 +973,9 @@ int find_candidate_rtns_for_translation(IMG img)
 			  xed_reg(XED_REG_RAX),
 			  xed_mem_bd(XED_REG_INVALID,
 				     xed_disp((ADDRINT)&bbl_map[prev_ins_addr].ex_counter, 64), 64));
+		////////////////////////////////////////////////////////
+		cout << dec << bbl_map[prev_ins_addr].ex_counter << endl;
+		//////////////////////////////////////////////////////////
 		xed_encoder_request_zero_set_mode(&enc_req1, &dstate);
 		convert_ok1 = xed_convert_to_encoder_request(&enc_req1, &enc_instr1);
 		if (!convert_ok1) {
@@ -1265,7 +1268,7 @@ void dump_bb_map_thread(void *v)
         cerr << "dump bb counters" << endl;	
 	for (const auto& pair : bbl_map) {
 	  count++;
-	  cout << "Key: " << pair.first << ", Value: " << *(pair.second.ex_counter) << std::endl;
+	  cout << "Key: " << pair.first << ", Value: " << pair.second.ex_counter << std::endl;
 	}
 	cout << "map size:" << bbl_map.size() << endl;
 	cout << "count:" << count << endl;
