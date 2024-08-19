@@ -133,6 +133,7 @@ volatile bool enable_mt_dump_counters_flag = false;
 typedef struct {
   ADDRINT bbl_address;
   int ex_counter;
+  std::string optimized = "";
 } bbl_profile;
 
 
@@ -284,11 +285,6 @@ void dump_tc()
 
       size = xed_decoded_inst_get_length (&new_xedd);
   }
-  // TODO: uncomment for print the BBLs
-  //for (const auto& pair : bbl_map) {
-  //      cerr << "Key: " << pair.first << ", Value: " << pair.second.ex_counter << std::endl;
-  //  }
-  
 }
 
 
@@ -779,15 +775,10 @@ int find_candidate_rtns_for_translation(IMG img)
 {
     int rc;
     bool jump_ins_flag = false;
-    //bool rax_kill_ins_flag;
-    //bool stop_iterate = false;
-    //    bool new_search_kill = true;
-    //ADDRINT prev_ins_addr;
     ADDRINT last_bbl_address = 0;
     bool found_kill_already = false;
     bool new_bbl = true;
-    //    ADDRINT kill_rax_instruction_addr;
-    //bool finished_bbl = false;
+
     // go over routines and check if they are candidates for translation and mark them for translation:
 
     for (SEC sec = IMG_SecHead(img); SEC_Valid(sec); sec = SEC_Next(sec))
@@ -814,10 +805,6 @@ int find_candidate_rtns_for_translation(IMG img)
             for (INS ins = RTN_InsHead(rtn); INS_Valid(ins); ins = INS_Next(ins)) {
 	      jump_ins_flag = false;
 	      jump_ins_flag = is_jump_instruction(ins);
-	      /*if(jump_ins_flag){
-		new_bbl = true;
-		continue;
-		}*/
 	      ADDRINT current_instruction_addr = INS_Address(ins);
 	      if (new_bbl){
 		new_bbl = false;
@@ -828,6 +815,7 @@ int find_candidate_rtns_for_translation(IMG img)
 		  bbl_profile temp_member;
 		  temp_member.bbl_address = current_instruction_addr;
 		  temp_member.ex_counter = 0;
+		  temp_member.optimized = "optimized";
 		  bbl_map[last_bbl_address] = temp_member;
 		}
 	      }
@@ -885,18 +873,13 @@ int find_candidate_rtns_for_translation(IMG img)
 		    return -1;
 		  }
 		}
+		bbl_map[last_bbl_address].optimized = "optimized";
 	      }
-	      
-
-
-	      
-
 	      
 	      //debug print of orig instruction:
 	      if (KnobVerbose) {
 		cerr << "old instr: ";
 		cerr << "0x" << hex << INS_Address(ins) << ": " << INS_Disassemble(ins) <<  endl;
-		//xed_print_hex_line(reinterpret_cast<UINT8*>(INS_Address (ins)), INS_Size(ins));
 	      }
 
 
@@ -912,46 +895,6 @@ int find_candidate_rtns_for_translation(IMG img)
 		unsigned int ilen1 = XED_MAX_INSTRUCTION_BYTES;
 		unsigned int olen1 = 0;
 		
-		xed_inst0(&enc_instr1, dstate, XED_ICLASS_NOP2, 64);
-		
-		xed_encoder_request_zero_set_mode(&enc_req1, &dstate);
-		xed_bool_t convert_ok1 = xed_convert_to_encoder_request(&enc_req1, &enc_instr1);
-		if (!convert_ok1) {
-		  cerr << "conversion to encode request failed" << endl;
-		  return -1;
-		}
-		xed_error_enum_t xed_error = xed_encode(&enc_req1,
-							reinterpret_cast<UINT8*>(encoded_ins1), ilen1, &olen1);
-		if (xed_error != XED_ERROR_NONE) {
-		  cerr << "ENCODE ERROR: " << xed_error_enum_t2str(xed_error) << endl;
-		  return -1;
-		}
-		xed_decoded_inst_zero_set_mode(&xedd1,&dstate);
-		xed_code1 = xed_decode(&xedd1, reinterpret_cast<UINT8*>(&encoded_ins1), max_inst_len);
-		if (xed_code1 != XED_ERROR_NONE) {
-		  //cerr << "ERROR: xed decode failed for instr at: " << "0x" << hex << addr << endl;
-		  return -1;;
-		}
-		rc = add_new_instr_entry(&xedd1, 0x0, olen1, false);
-		if (rc < 0) {
-		  cerr << "ERROR: failed during instructon translation." << endl;
-		  return -1;
-		}
-		/*auto it = bbl_map.find(prev_ins_addr);
-		if (it == bbl_map.end()) {
-		  bbl_profile temp_member;
-		  temp_member.bbl_address = prev_ins_addr;
-		  if (!new_search_kill){
-		    temp_member.ex_counter = counter;
-		  }
-		  else{
-		    int counter2 = 0;
-		    temp_member.ex_counter = &counter2;
-		  }
-		  //		  temp_member.kill_addr = kill_rax_instruction_addr;
-		  bbl_map[prev_ins_addr] = temp_member;
-		  
-		  }*/
 		if (found_kill_already == false){
 		  static uint64_t rax_mem;
 		  for(int i = 0; i < 5; i++){
@@ -962,7 +905,6 @@ int find_candidate_rtns_for_translation(IMG img)
 		    }
 		    else if (i == 1) {
 		      // MOV from bb_map_mem[bbl_num] into RAX – (load bbl counter from mem into RAX)
-		      // MOV from bb_map into RAX
 		      xed_inst2(&enc_instr1, dstate, XED_ICLASS_MOV, 64,
 				xed_reg(XED_REG_RAX),
 				xed_mem_bd(XED_REG_INVALID, xed_disp((ADDRINT)&bbl_map[last_bbl_address].ex_counter, 64), 64));
@@ -987,13 +929,13 @@ int find_candidate_rtns_for_translation(IMG img)
 				xed_mem_bd(XED_REG_INVALID, xed_disp((ADDRINT)&rax_mem, 64), 64));
 		    }
 		    xed_encoder_request_zero_set_mode(&enc_req1, &dstate);
-		    convert_ok1 = xed_convert_to_encoder_request(&enc_req1, &enc_instr1);
+		    xed_bool_t convert_ok1 = xed_convert_to_encoder_request(&enc_req1, &enc_instr1);
 		    if (!convert_ok1) {
 		      cerr << "conversion to encode request failed" << endl;
 		      return -1;
 		    }
-		    xed_error = xed_encode(&enc_req1,
-					   reinterpret_cast<UINT8*>(encoded_ins1), ilen1, &olen1);
+		    xed_error_enum_t xed_error = xed_encode(&enc_req1,
+							    reinterpret_cast<UINT8*>(encoded_ins1), ilen1, &olen1);
 		    if (xed_error != XED_ERROR_NONE) {
 		      cerr << "ENCODE ERROR: " << xed_error_enum_t2str(xed_error) << endl;
 		      return -1;
@@ -1010,6 +952,7 @@ int find_candidate_rtns_for_translation(IMG img)
 		      return -1;
 		    }
 		  }
+		  bbl_map[last_bbl_address].optimized = "not optimized";
 		}
 	      } // jump_ins_flag -> we are out of the jump handler if
 		
@@ -1135,30 +1078,83 @@ inline void commit_translated_routines()
 /*****************************/
 void dump_bb_map_thread(void *v)
 {
-    count_threads++;
-    while (!enable_mt_dump_counters_flag);
-
-    sleep(1);
-
-    while (true) {
-
-        PIN_LockClient();
-	int count = 0;
-        cerr << "dump bb counters" << endl;	
-	for (const auto& pair : bbl_map) {
-	  count++;
-	  if (pair.second.ex_counter == 0){
-	    continue;
-	  }
-	  cout << "Key: " << pair.first << ", Value: " << pair.second.ex_counter << std::endl;
-	}
-	cout << "map size:" << bbl_map.size() << endl;
-	cout << "count:" << count << endl;
-	cout << "count_threads:" << count_threads << endl;
-        PIN_UnlockClient();
-
-        sleep(1);
+  int outer_loop_count = 0;
+  int inner_loop_count = 0;
+  int diff = 0;
+  int optimized_counter = 0;
+  int not_optimized_counter = 0;
+  std::map<ADDRINT, int> diff_map;
+  out = new std::ofstream;
+  out->open("bbl_counters.csv");
+  while (!enable_mt_dump_counters_flag);
+  sleep(1);
+  while (true) {
+    if (outer_loop_count > 0){
+      *out << std::string(4 * outer_loop_count, ',');
+      *out << "bbl address," << "execution counter of iteration: " << outer_loop_count
+	   << ", diff from previous iteration"
+	   << ", optimized?" << endl;
     }
+    PIN_LockClient();
+    int count = 0;
+    cerr << "dump bb counters" << endl;
+    //    *out << "bbl address,exe counter" << endl;
+    for (const auto& pair : bbl_map) {
+      if (pair.second.ex_counter == 0){
+	continue;
+      }
+      if (outer_loop_count == 0 && inner_loop_count == 0){
+	*out << "bbl address," << "execution counter of iteration: " << outer_loop_count
+	   << ", diff from previous iteration"
+	   << ", optimized?" << endl;
+      }
+      if (outer_loop_count > 0){
+	*out << std::string(4 * outer_loop_count, ',');
+      }
+      count++;
+      inner_loop_count ++;
+      if (outer_loop_count == 0){
+	if (pair.second.optimized == "optimized"){
+	  optimized_counter++;
+	}
+	else{
+	  not_optimized_counter++;
+	}
+	diff_map[pair.first] = pair.second.ex_counter;
+	diff = 0;
+      }
+      else {
+	int prev_counter = diff_map[pair.first];
+	diff_map[pair.first] = pair.second.ex_counter;
+	diff = diff_map[pair.first] - prev_counter;
+      }
+      
+      *out << "0x" << hex << pair.first << ", "
+	   << dec << pair.second.ex_counter << ", "
+	   << diff << ", "
+	   << pair.second.optimized
+	   << std::endl;
+
+       
+    }
+    if (outer_loop_count == 0){
+      double frac = static_cast<double>(optimized_counter) / (optimized_counter + not_optimized_counter);
+      *out << ", optimized: " << optimized_counter
+	   << ", not optimized: " << not_optimized_counter
+	   << ", optimization part: " << std::fixed << std::setprecision(4) << frac * 100 << "%"
+	   << endl;
+    }
+    
+    cout << "map size:" << bbl_map.size() << endl;
+    cout << "count:" << count << endl;
+    
+    PIN_UnlockClient();
+    
+    sleep(1);
+    outer_loop_count++;
+  }
+  out->close();
+  delete out;
 }
 
 /****************************/
@@ -1249,14 +1245,11 @@ VOID ImageLoad(IMG img, VOID *v)
     cout << "after memory allocation" << endl;
 
     // Step 2: go over all routines and identify candidate routines and copy their code into the instr map IR:
-    cout << "here" << endl;
     rc = find_candidate_rtns_for_translation(img);
-    cout << "here2" << endl;
     if (rc < 0) {
         cerr << "failed to find candidates for translation\n";
         return;
     }
-    cout << "here3" << endl;
     cout << "after identifying candidate routines" << endl;
 
     // Step 3: Chaining - calculate direct branch and call instructions to point to corresponding target instr entries:
@@ -1307,36 +1300,6 @@ VOID ImageLoad(IMG img, VOID *v)
     }
 }
 
-//////////////////Trace///////////////////////////
-/*VOID CountBbl(ADDRINT bblAddr) {
-    bbl_map[bblAddr].ex_counter++;
-    }*/
-//void PIN_FAST_ANALYSIS_CALL docount(ADDRINT bbl_addr) { bbl_map[bbl_addr].ex_counter++; }
-
-/*void Trace(TRACE trace, void *v){
-  cout << "hi" << endl;
-  //for(BBL bbl = TRACE_BblHead(trace); BBL_Valid(bbl); bbl = BBL_Next(bbl)){
-    //ADDRINT bbl_addr = BBL_Address(bbl);
-    //auto it = bbl_map.find(bbl_addr);
-    //if (it == bbl_map.end()) {
-      //bbl_profile temp_member;
-      //temp_member.bbl_start_point = bbl_addr;
-      //temp_member.ex_counter = 0;
-      //bbl_map[BBL_Address(bbl)] = temp_member;
-    //}
-    //BBL_InsertCall(bbl, IPOINT_ANYWHERE, (AFUNPTR)docount, IARG_FAST_ANALYSIS_CALL, IARG_PTR, bbl_addr, IARG_END); 
-  //}
-  }*/
-
-/*void Routine(RTN rtn, void *v){
-  RTN_Open(rtn);
-  for(BBL bbl = RTN_BblHead(rtn); BBL_Valid(bbl); bbl = BBL_Next(bbl)){
-    RTN_InsertCallProbed(rtn, IPOINT_BEFORE, (AFUNPTR)CountBbl, IARG_ADDRINT, BBL_Address(bbl), IARG_END);
-  }
-  }*/
-
-
-
 
 /* ===================================================================== */
 /* Print Help Message                                                    */
@@ -1375,7 +1338,6 @@ int main(int argc, char * argv[])
       // It is safe to create internal threads in the tool's main procedure and spawn new
       // internal threads from existing ones. All other places, like Pin callbacks and
       // analysis routines in application threads, are not safe for creating internal threads.
-
       THREADID tid = PIN_SpawnInternalThread(dump_bb_map_thread, NULL, 0, NULL);
       if (tid == INVALID_THREADID) {
           cerr << "failed to spawn a thread for commit" << endl;
